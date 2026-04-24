@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Bobo's Monster Band</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; touch-action: manipulation; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #2d1b4e; font-family: 'Comic Sans MS', 'Chalkboard SE', sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #muteBtn { position: absolute; top: 10px; right: 10px; width: 50px; height: 50px; border: none; border-radius: 50%; background: #FFD700; font-size: 24px; cursor: pointer; z-index: 10; box-shadow: 0 3px 6px rgba(0,0,0,0.3); }
+</style>
+</head>
+<body>
+<button id="muteBtn" aria-label="Mute">🔊</button>
+<canvas id="gameCanvas"></canvas>
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+window.addEventListener('resize', resize);
+resize();
+
+// Audio context
+let audioCtx = null;
+let muted = false;
+function initAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+function playTone(freq, type, duration, vol = 0.15) {
+  if (muted || !audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + duration);
+}
+function playNote(noteIndex, duration = 0.3) {
+  const freqs = [261.63, 329.63, 392.00, 523.25]; // C4, E4, G4, C5
+  playTone(freqs[noteIndex], 'sine', duration, 0.2);
+}
+function playWinSound() {
+  if (muted || !audioCtx) return;
+  [0,1,2,3,2,3].forEach((n,i)=>setTimeout(()=>playNote(n,0.25),i*150));
+}
+function playLoseSound() {
+  if (muted || !audioCtx) return;
+  playTone(150, 'sawtooth', 0.4, 0.1);
+}
+function playStartSound() {
+  if (muted || !audioCtx) return;
+  [0,2,3].forEach((n,i)=>setTimeout(()=>playNote(n,0.2),i*120));
+}
+
+// Game state
+const STATE = { TITLE: 0, PLAY: 1, SHOW: 2, VICTORY: 3 };
+let state = STATE.TITLE;
+let level = 1;
+let lives = 3;
+let sequence = [];
+let playerIndex = 0;
+let showingIndex = 0;
+let showTimer = 0;
+let activeMonster = -1;
+let particles = [];
+let stars = [];
+let victoryTimer = 0;
+let message = '';
+let msgTimer = 0;
+
+const monsters = [
+  { color: '#FF6B6B', eye: '#fff', pupil: '#222', x: 0, y: 0, r: 0, name: 'Drum', note: 0 },
+  { color: '#4ECDC4', eye: '#fff', pupil: '#222', x: 0, y: 0, r: 0, name: 'Flute', note: 1 },
+  { color: '#95E1D3', eye: '#fff', pupil: '#222', x: 0, y: 0, r: 0, name: 'Guitar', note: 2 },
+  { color: '#FFD93D', eye: '#fff', pupil: '#222', x: 0, y: 0, r: 0, name: 'Piano', note: 3 }
+];
+
+function generateSequence() {
+  sequence = [];
+  for (let i = 0; i < level + 2; i++) sequence.push(Math.floor(Math.random() * 4));
+}
+
+function makeParticles(x, y, color) {
+  for (let i = 0; i < 12; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 8,
+      vy: (Math.random() - 0.5) * 8,
+      life: 1,
+      color,
+      size: Math.random() * 6 + 3
+    });
+  }
+}
+
+function makeStars() {
+  stars = [];
+  for (let i = 0; i < 50; i++) {
+    stars.push({ x: Math.random() * W, y: Math.random() * H, size: Math.random() * 2 + 1, twinkle: Math.random() * Math.PI * 2 });
+  }
+}
+makeStars();
+
+function drawStar(x, y, size, color, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  for (let i = 0; i < 5; i++) {
+    const angle = (i * 4 * Math.PI) / 5 - Math.PI / 2;
+    const px = x + Math.cos(angle) * size;
+    const py = y + Math.sin(angle) * size;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawMonster(m, scale = 1) {
+  const r = m.r * scale;
+  ctx.save();
+  ctx.translate(m.x, m.y);
+
+  // Body shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.arc(4, 4, r, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body
+  ctx.fillStyle = m.color;
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // Eyes
+  const eyeR = r * 0.22;
+  const eyeOffset = r * 0.28;
+  const pupilR = eyeR * 0.5;
+  // Left eye
+  ctx.fillStyle = m.eye;
+  ctx.beginPath();
+  ctx.arc(-eyeOffset, -eyeOffset*0.3, eyeR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = m.pupil;
+  ctx.beginPath();
+  ctx.arc(-eyeOffset + pupilR*0.3, -eyeOffset*0.3, pupilR, 0, Math.PI * 2);
+  ctx.fill();
+  // Right eye
+  ctx.fillStyle = m.eye;
+  ctx.beginPath();
+  ctx.arc(eyeOffset, -eyeOffset*0.3, eyeR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = m.pupil;
+  ctx.beginPath();
+  ctx.arc(eyeOffset + pupilR*0.3, -eyeOffset*0.3, pupilR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Smile
+  ctx.strokeStyle = m.pupil;
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.arc(0, r * 0.1, r * 0.35, 0.2, Math.PI - 0.2);
+  ctx.stroke();
+
+  // Horns
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.moveTo(-r*0.5, -r*0.75);
+  ctx.lineTo(-r*0.35, -r*1.15);
+  ctx.lineTo(-r*0.15, -r*0.75);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(r*0.15, -r*0.75);
+  ctx.lineTo(r*0.35, -r*1.15);
+  ctx.lineTo(r*0.5, -r*0.75);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawHeart(x, y, size, filled) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = filled ? '#FF4757' : 'rgba(255,255,255,0.3)';
+  ctx.strokeStyle = '#FF4757';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  const topCurveHeight = size * 0.3;
+  ctx.moveTo(0, topCurveHeight);
+  ctx.bezierCurveTo(0, 0, -size/2, 0, -size/2, topCurveHeight);
+  ctx.bezierCurveTo(-size/2, (size + topCurveHeight) / 2, 0, size, 0, size);
+  ctx.bezierCurveTo(0, size, size/2, (size + topCurveHeight) / 2, size/2, topCurveHeight);
+  ctx.bezierCurveTo(size/2, 0, 0, 0, 0, topCurveHeight);
+  ctx.closePath();
+  if (filled) ctx.fill(); else { ctx.fill(); ctx.stroke(); }
+  ctx.restore();
+}
+
+function update(dt) {
+  // Stars twinkle
+  stars.forEach(s => s.twinkle += dt * 2);
+
+  // Particles
+  particles.forEach(p => {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.15;
+    p.life -= dt * 1.5;
+  });
+  particles = particles.filter(p => p.life > 0);
+
+  // Message timer
+  if (msgTimer > 0) msgTimer -= dt;
+
+  if (state === STATE.SHOW) {
+    showTimer -= dt;
+    if (showTimer <= 0) {
+      showingIndex++;
+      if (showingIndex >= sequence.length) {
+        state = STATE.PLAY;
+        activeMonster = -1;
+        message = 'Your turn!';
+        msgTimer = 1.2;
+      } else {
+        showTimer = 0.6;
+        activeMonster = sequence[showingIndex];
+        playNote(activeMonster, 0.35);
+      }
+    } else if (showingIndex < sequence.length) {
+      activeMonster = sequence[showingIndex];
+    }
+  }
+
+  if (state === STATE.VICTORY) {
+    victoryTimer += dt;
+    if (Math.random() < dt * 4) {
+      particles.push({
+        x: Math.random() * W, y: -10,
+        vx: (Math.random() - 0.5) * 2,
+        vy: Math.random() * 3 + 2,
+        life: 2,
+        color: ['#FF6B6B','#4ECDC4','#95E1D3','#FFD93D','#FF4757','#7bed9f'][Math.floor(Math.random()*6)],
+        size: Math.random() * 5 + 3
+      });
+    }
+  }
+}
+
+function draw() {
+  // Background
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#2d1b4e');
+  grad.addColorStop(1, '#5e3c8a');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars
+  stars.forEach(s => {
+    const alpha = 0.5 + 0.5 * Math.sin(s.twinkle);
+    ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Update positions
+  const cols = W > H ? 4 : 2;
+  const rows = W > H ? 1 : 2;
+  const spacingX = W / (cols + 1);
+  const spacingY = H * 0.35;
+  const startY = H * 0.48;
+  monsters.forEach((m, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    m.x = spacingX * (col + 1);
+    m.y = startY + (row * spacingY);
+    m.r = Math.min(W, H) * 0.11;
+  });
+
+  if (state === STATE.TITLE) {
+    ctx.fillStyle = '#FFD93D';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const titleSize = Math.min(W * 0.1, 64);
+    ctx.font = `bold ${titleSize}px 'Comic Sans MS', sans-serif`;
+    ctx.shadowColor = 'rgba(0,0,0,0.4)';
+    ctx.shadowBlur = 10;
+    ctx.fillText("Bobo's Monster Band", W/2, H * 0.18);
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = '#fff';
+    ctx.font = `${Math.min(W*0.04, 22)}px 'Comic Sans MS', sans-serif`;
+    ctx.fillText('Watch the monsters play, then repeat the tune!', W/2, H * 0.28);
+
+    // Draw monsters idle
+    monsters.forEach((m, i) => drawMonster(m, 1 + Math.sin(Date.now()/500 + i) * 0.05));
+
+    // Start button
+    const btnW = Math.min(W * 0.5, 280);
+    const btnH = 64;
+    const btnX = W/2 - btnW/2;
+    const btnY = H * 0.78;
+    ctx.fillStyle = '#FF6B6B';
+    ctx.beginPath();
+    ctx.roundRect(btnX, btnY, btnW, btnH, 32);
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${Math.min(W*0.05, 28)}px 'Comic Sans MS', sans-serif`;
+    ctx.fillText('Start Game!', W/2, btnY + btnH/2 + 3);
+  }
+
+  if (state === STATE.PLAY || state === STATE.SHOW) {
+    // Level and lives
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${Math.min(W*0.045, 24)}px 'Comic Sans MS', sans-serif`;
+    ctx.fillText(`Level ${level} of 5`, W * 0.06, H * 0.08);
+
+    for (let i = 0; i < 3; i++) {
+      drawHeart(W * 0.06 + i * 36, H * 0.14, 18, i < lives);
+    }
+
+    if (msgTimer > 0) {
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#FFD93D';
+      ctx.font = `bold ${Math.min(W*0.06, 36)}px 'Comic Sans MS', sans-serif`;
+      ctx.shadowColor = 'rgba(0,0,0,0.5)';
+      ctx.shadowBlur = 8;
+      ctx.fillText(message, W/2, H * 0.28);
+      ctx.shadowBlur = 0;
+    }
+
+    // Monsters
+    monsters.forEach((m, i) => {
+      const s = (activeMonster === i) ? 1.15 : 1;
+      drawMonster(m, s);
+      if (activeMonster === i) {
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, m.r * 1.25, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    });
+  }
+
+  if (state === STATE.VICTORY) {
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    const titleSize = Math.min(W * 0.12, 72);
+    ctx.fillStyle = '#FFD93D';
+    ctx.font = `bold ${titleSize}px 'Comic Sans MS', sans-serif`;
+    ctx.shadowColor = 'rgba(0,0,0,0.5)';
+    ctx.shadowBlur = 12;
+    ctx.fillText('Good Game, Bobo!', W/2, H * 0.25);
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = '#fff';
+    ctx.font = `${Math.min(W*0.045, 26)}px 'Comic Sans MS', sans-serif`;
+    ctx.fillText('The Monster Band loves playing with you!', W/2, H * 0.38);
+
+    monsters.forEach((m, i) => {
+      const bounce = Math.abs(Math.sin(victoryTimer * 3 + i)) * 0.15;
+      drawMonster(m, 1 + bounce);
+    });
+
+    // Play again button
+    const btnW = Math.min(W * 0.5, 280);
+    const btnH = 64;
+    const btnX = W/2 - btnW/2;
+    const btnY = H * 0.78;
+    ctx.fillStyle = '#4ECDC4';
+    ctx.beginPath();
+    ctx.roundRect(btnX, btnY, btnW, btnH, 32);
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${Math.min(W*0.05, 28)}px 'Comic Sans MS', sans-serif`;
+    ctx.fillText('Play Again!', W/2, btnY + btnH/2 + 3);
+  }
+
+  // Particles
+  particles.forEach(p => {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+let lastTime = 0;
+function loop(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.1);
+  lastTime = timestamp;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// Input
+function getMonsterAt(x, y) {
+  for (let i = 0; i < monsters.length; i++) {
+    const m = monsters[i];
+    const dx = x - m.x;
+    const dy = y - m.y;
+    if (dx*dx + dy*dy < m.r * m.r * 1.5) return i;
+  }
+  return -1;
+}
+
+function startShowSequence() {
+  state = STATE.SHOW;
+  showingIndex = 0;
+  showTimer = 0.8;
+  playerIndex = 0;
+  activeMonster = -1;
+  message = 'Watch...';
+  msgTimer = 0.8;
+  setTimeout(() => {
+    if (state === STATE.SHOW && showingIndex < sequence.length) {
+      activeMonster = sequence[showingIndex];
+      playNote(activeMonster, 0.35);
+    }
+  }, 400);
+}
+
+function handleMonsterClick(idx) {
+  if (state !== STATE.PLAY) return;
+  initAudio();
+  activeMonster = idx;
+  playNote(idx, 0.3);
+  makeParticles(monsters[idx].x, monsters[idx].y, monsters[idx].color);
+  setTimeout(() => { if (state === STATE.PLAY) activeMonster = -1; }, 250);
+
+  if (idx === sequence[playerIndex]) {
+    playerIndex++;
+    if (playerIndex >= sequence.length) {
+      // Level complete
+      state = STATE.SHOW; // temporary to block input
+      message = 'Great job!';
+      msgTimer = 1.0;
+      playWinSound();
+      makeParticles(W/2, H/2, '#FFD93D');
+      setTimeout(() => {
+        level++;
+        if (level > 5) {
+          state = STATE.VICTORY;
+          victoryTimer = 0;
+          playWinSound();
+        } else {
+          generateSequence();
+          startShowSequence();
+        }
+      }, 1200);
+    }
+  } else {
+    lives--;
+    playLoseSound();
+    makeParticles(monsters[idx].x, monsters[idx].y, '#FF4757');
+    if (lives <= 0) {
+      message = 'Try again!';
+      msgTimer = 1.2;
+      state = STATE.SHOW;
+      setTimeout(() => {
+        lives = 3;
+        level = 1;
+        generateSequence();
+        startShowSequence();
+      }, 1500);
+    } else {
+      message = 'Oops! Try again';
+      msgTimer = 1.0;
+      playerIndex = 0;
+      state = STATE.SHOW;
+      setTimeout(() => {
+        startShowSequence();
+      }, 1200);
+    }
+  }
+}
+
+function handleStartClick() {
+  initAudio();
+  playStartSound();
+  level = 1;
+  lives = 3;
+  generateSequence();
+  startShowSequence();
+}
+
+function handleRestartClick() {
+  initAudio();
+  playStartSound();
+  state = STATE.TITLE;
+  level = 1;
+  lives = 3;
+  particles = [];
+}
+
+canvas.addEventListener('pointerdown', e => {
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  if (state === STATE.TITLE) {
+    const btnW = Math.min(W * 0.5, 280);
+    const btnH = 64;
+    const btnX = W/2 - btnW/2;
+    const btnY = H * 0.78;
+    if (x >= btnX && x <= btnX + btnW && y >= btnY && y <= btnY + btnH) {
+      handleStartClick();
+    }
+    return;
+  }
+
+  if (state === STATE.VICTORY) {
+    const btnW = Math.min(W * 0.5, 280);
+    const btnH = 64;
+    const btnX = W/2 - btnW/2;
+    const btnY = H * 0.78;
+    if (x >= btnX && x <= btnX + btnW && y >= btnY && y <= btnY + btnH) {
+      handleRestartClick();
+    }
+    return;
+  }
+
+  if (state === STATE.PLAY) {
+    const m = getMonsterAt(x, y);
+    if (m >= 0) handleMonsterClick(m);
+  }
+});
+
+document.getElementById('muteBtn').addEventListener('click', () => {
+  muted = !muted;
+  document.getElementById('muteBtn').textContent = muted ? '🔇' : '🔊';
+});
+</script>
+</body>
+</html>
